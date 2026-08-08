@@ -259,3 +259,74 @@ def install_clipboard_fix(root):
     root.bind_class("Text", "<<Copy>>", text_copy)
     root.bind_class("Text", "<<Cut>>", lambda e: text_copy(e, cut=True))
 
+
+def open_in_editor(path):
+    """
+    Hand a file to the system's default text editor.
+
+    Dropping privileges matters here. The trainer usually runs elevated so it
+    can read another process's memory, and a child launched from it inherits
+    that -- which means the editor runs as root, writes root-owned files back
+    into the user's cheats/ folder, and often cannot even reach the session
+    bus to open a window. So when we are elevated and can tell who really
+    launched us, the child is dropped back to that user first and pointed at
+    their HOME and runtime dir rather than root's.
+
+    Raises on failure; callers report it.
+    """
+    import subprocess
+
+    if sys.platform.startswith("win"):
+        os.startfile(path)                                  # noqa: S606
+        return
+    if sys.platform == "darwin":
+        subprocess.Popen(["open", path],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return
+
+    env = dict(os.environ)
+    preexec = None
+    ids = xemu_privs.invoking_user() if xemu_privs.elevated() else None
+    if ids:
+        uid, gid = ids
+        if gid is None:
+            try:
+                import pwd
+                gid = pwd.getpwuid(uid).pw_gid
+            except Exception:                               # noqa: BLE001
+                gid = uid
+
+        def preexec():                                      # noqa: F811
+            os.setgid(gid)
+            try:
+                os.initgroups(__import__("pwd").getpwuid(uid).pw_name, gid)
+            except Exception:                               # noqa: BLE001
+                pass
+            os.setuid(uid)
+
+        try:
+            import pwd
+            env["HOME"] = pwd.getpwuid(uid).pw_dir
+            env["USER"] = env["LOGNAME"] = pwd.getpwuid(uid).pw_name
+        except Exception:                                   # noqa: BLE001
+            pass
+        # Root's runtime dir is unreadable to the dropped child and makes
+        # xdg-open fail with a portal error rather than opening anything.
+        env["XDG_RUNTIME_DIR"] = f"/run/user/{uid}"
+        env.pop("SUDO_USER", None)
+        env.pop("SUDO_UID", None)
+        env.pop("SUDO_GID", None)
+
+    # xdg-open first, then the usual desktop-specific openers, so this still
+    # works on a box where xdg-utils is not installed.
+    last = None
+    for opener in ("xdg-open", "gio", "gnome-open", "kde-open5", "kde-open"):
+        argv = [opener, "open", path] if opener == "gio" else [opener, path]
+        try:
+            subprocess.Popen(argv, env=env, preexec_fn=preexec,
+                             stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+            return
+        except (OSError, ValueError) as exc:
+            last = exc
+    raise RuntimeError(f"no usable file opener found ({last})")

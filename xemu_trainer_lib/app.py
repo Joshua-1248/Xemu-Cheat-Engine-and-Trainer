@@ -12,7 +12,7 @@ from .config import Config
 from . import cheatfiles  # noqa: F401
 from .mem import XemuMemory  # noqa: F401
 from .tree_ops import count_tree, enabled_cheats, group_paths, group_state, set_subtree_enabled, sort_key, sort_tree  # noqa: F401
-from .ui_widgets import bind_wheel, bind_wheel_cycle, bind_wheel_number, install_clipboard_fix, popup_menu  # noqa: F401
+from .ui_widgets import bind_wheel, bind_wheel_cycle, bind_wheel_number, install_clipboard_fix, open_in_editor, popup_menu  # noqa: F401
 
 
 class CheatManagerApp(tk.Tk):
@@ -362,6 +362,17 @@ class CheatManagerApp(tk.Tk):
         for c in range(per_row):
             ctrl_frame.grid_columnconfigure(c, weight=1, uniform="cheatbtns")
 
+        # Column per_row is the spare one to the right of the button grid; the
+        # Sort control already sits in it on the bottom row, so this goes in
+        # the row above rather than into the grid proper -- dropping it in with
+        # the others would reflow all eleven buttons onto different rows.
+        self.edit_file_btn = tk.Button(
+            ctrl_frame, text="Edit Text File", command=self._edit_text_file,
+            font=("Helvetica", 9, "bold"), bg="#455A64", fg="white",
+            relief="flat")
+        self.edit_file_btn.grid(row=max(0, ((len(buttons) - 1) // per_row) - 1),
+                                column=per_row, sticky="ew", padx=4, pady=2)
+
         sort_f = tk.Frame(ctrl_frame, bg="#212121")
         sort_f.grid(row=(len(buttons) - 1) // per_row, column=per_row,
                     sticky="e", padx=4)
@@ -632,6 +643,57 @@ class CheatManagerApp(tk.Tk):
         if idx is None or idx >= len(self.games):
             return None
         return game_section(self.games[idx], self._current_section())
+
+    def _edit_text_file(self):
+        """
+        Open the selected game's file for the section on screen.
+
+        Cheats tab opens cheats/<stem>.txt, Patches tab opens
+        patches/<stem>.txt -- the same path Config.save writes to, resolved
+        the same way, so this can never open a file the trainer is not the
+        one maintaining.
+        """
+        idx = self.selected_game_idx
+        if idx is None or idx >= len(self.games):
+            messagebox.showinfo("Edit Text File",
+                                "Select a game first.", parent=self)
+            return
+        game = self.games[idx]
+        kind = self._current_section()
+        stem = Config._stem_of(game)
+        if not stem:
+            messagebox.showerror(
+                "Edit Text File",
+                f"{game.get('name') or 'This game'} has no filename stem, so "
+                "it has no file on disk yet.", parent=self)
+            return
+
+        # Flush first. Autosave is debounced by 400 ms, so without this the
+        # file could still be missing the last toggle when the editor opens
+        # it -- and then saving in the editor would quietly lose that toggle
+        # when the trainer's own write landed afterwards.
+        self._save_autosave(immediate=True)
+
+        path = cheatfiles.path_for_stem(Config.base_dir(), kind, stem)
+        if not os.path.exists(path):
+            messagebox.showerror(
+                "Edit Text File",
+                f"No {kind} file for this game:\n\n{path}", parent=self)
+            return
+        try:
+            open_in_editor(path)
+        except Exception as exc:                            # noqa: BLE001
+            messagebox.showerror(
+                "Edit Text File",
+                f"Could not open the file:\n\n{path}\n\n{exc}", parent=self)
+            return
+        # The editor is a separate process, so anything saved there is
+        # invisible until the trainer re-reads it. Say so once rather than
+        # letting a later autosave overwrite the edit without warning.
+        self.status_label.config(
+            text=f"Opened {os.path.basename(path)} - "
+                 "use Reload File after saving", fg="#4CAF50")
+        self.after(6000, self._restore_status)
 
     def _on_section_change(self, event=None):
         try:
@@ -1816,11 +1878,23 @@ class CheatManagerApp(tk.Tk):
         if self.selected_game_idx is None:
             return
         game = self.games[self.selected_game_idx]
-        if not game.get('path'):
+        # 'path' is only ever set on games that came out of a legacy INI
+        # section. Everything loaded from cheats/ and patches/ -- which is
+        # every game now -- has an empty one, so reloading used to report
+        # "no cheat file" for the whole database. Fall back to the same
+        # stem-derived path the save routine writes to, and pick it per
+        # section so the Patches tab reloads the patches file.
+        path = game.get('path') or ''
+        if not path:
+            stem = Config._stem_of(game)
+            if stem:
+                path = cheatfiles.path_for_stem(
+                    Config.base_dir(), self._current_section(), stem)
+        if not path or not os.path.exists(path):
             messagebox.showinfo("Reload", "No cheat file associated with this game.")
             return
         try:
-            tree = self.cheat_engine.parse_file(game['path'])
+            tree = self.cheat_engine.parse_file(path)
         except Exception as e:
             messagebox.showerror("Error", f"Failed to reload: {e}")
             return
