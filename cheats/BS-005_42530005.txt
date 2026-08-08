@@ -8,18 +8,21 @@ enabled=0
 20927178 432F0000
 
 [Infinite\Stamina (Alternate)]
+author=Josh_7774
 enabled=0
-20927178 7F7FFFFF
+20927178 7FFFFFFF
 
 [Infinite\Health]
-enabled=0
-20927154 43480000
-
-[Infinite\Health (Alternate)]
+author=Josh_7774
 enabled=0
 20927154 461C3C00
 
-[Infinite\Hold Left Trigger To Moon Jump]
+[Infinite\Health (Alternate)]
+author=Josh_7774
+enabled=0
+20927154 461C3C00
+
+[Hold Left Trigger To Moon Jump]
 author=Josh_7774
 enabled=0
 D00002A5 010000FF
