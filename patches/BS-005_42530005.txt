@@ -3,5 +3,5 @@ gametitle=Elder Scrolls III, The: Morrowind - Game of the Year Edition
 [Invert Looking Angle Controls]
 author=Josh_7774
 desc=Patches looking up/down controls to be right stick up/down to look up/down.
-enabled=1
+enabled=0
 803D6125 00000000
