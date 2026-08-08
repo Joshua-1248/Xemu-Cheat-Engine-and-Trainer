@@ -10,6 +10,7 @@ from .cheat_tree import SECTIONS, all_game_nodes, game_section, group_child, is_
 from .codes import CheatEngine  # noqa: F401
 from .config import Config
 from . import cheatfiles  # noqa: F401
+from . import dbfetch  # noqa: F401
 from .mem import XemuMemory  # noqa: F401
 from .tree_ops import count_tree, enabled_cheats, group_paths, group_state, set_subtree_enabled, sort_key, sort_tree  # noqa: F401
 from .ui_widgets import bind_wheel, bind_wheel_cycle, bind_wheel_number, install_clipboard_fix, open_in_editor, popup_menu  # noqa: F401
@@ -63,6 +64,14 @@ class CheatManagerApp(tk.Tk):
         # they were added in, and the sort control below reorders the view
         # without touching it, so switching back to "Order added" restores it.
         self._sort_mode = Config.load_sort_mode()
+        # Database entries are held on separate keys ('db_cheats'/'db_patches')
+        # and merged only for display. Config.save writes 'cheats'/'patches',
+        # so keeping them apart is what stops the database from being written
+        # into the user's own files on the next autosave.
+        self._db_enabled = Config.load_db_cheats()
+        self._db_open = False
+        self._db_header_item = None
+        self._attach_db_trees()
         if saved_geom:
             self.geometry(saved_geom)
         install_clipboard_fix(self)
@@ -114,6 +123,31 @@ class CheatManagerApp(tk.Tk):
         self.gdb_status_label = tk.Label(bottom, text="", fg="#FF9800",
                                          bg="#212121", font=("Helvetica",8))
         self.gdb_status_label.pack(side="right")
+
+        # ---- shared cheat database ----
+        self.db_var = tk.BooleanVar(value=self._db_enabled)
+
+        def _apply_db(*_):
+            self._db_enabled = bool(self.db_var.get())
+            self._display_cheats(self.selected_game_idx)
+            self._rebuild_active_blocks()
+            self._save_autosave(immediate=True)
+            if self._db_enabled and not self._db_games:
+                self.status_label.config(
+                    text="No database downloaded yet - press Update Database",
+                    fg="#FF9800")
+                self.after(5000, self._restore_status)
+
+        self.db_var.trace_add("write", _apply_db)
+        tk.Button(bottom, text="Update Database", command=self._update_database,
+                  font=("Helvetica",8), bg="#455A64", fg="white", relief="flat",
+                  bd=0, padx=6).pack(side="right", padx=(4,4))
+        tk.Checkbutton(bottom, text="Load Database Cheats",
+                       variable=self.db_var, bg="#212121",
+                       fg="#B0BEC5", selectcolor="#151515",
+                       activebackground="#212121", activeforeground="#FFFFFF",
+                       font=("Helvetica",8), bd=0, highlightthickness=0
+                       ).pack(side="right", padx=(4,0))
 
         def _apply_interval(*_):
             try:
@@ -244,12 +278,23 @@ class CheatManagerApp(tk.Tk):
                                    bg="#1A1A1A", font=("Helvetica",9),
                                    anchor="w", justify="left", bd=1,
                                    relief="flat", padx=6, pady=3)
-        self.desc_box.grid(row=2, column=1, sticky="ew", pady=1)
+        self.desc_box.grid(row=2, column=1, sticky="new", pady=1)
         # A Message wraps to a fixed pixel width, so it has to be retold the
         # width whenever the pane is resized or long text spills sideways.
         self.desc_box.bind(
             "<Configure>",
             lambda e: e.widget.configure(width=max(120, e.width - 12)))
+        # Message sizes itself to its content, so a one-line description made
+        # the panel one line tall and the box visibly jumped between cheats.
+        # Pin the row to five lines: four more than the old single-line
+        # height, measured from the font rather than guessed in pixels so it
+        # stays right under a different theme or DPI.
+        try:
+            import tkinter.font as tkfont
+            _line = tkfont.Font(font=self.desc_box.cget("font")).metrics("linespace")
+        except Exception:                                   # noqa: BLE001
+            _line = 15
+        meta_frame.grid_rowconfigure(2, minsize=_line * 5 + 8)
         self._clear_meta_boxes()      # start on the placeholder, not blank
 
         # ---- Cheats / Patches tabs ----
@@ -717,6 +762,95 @@ class CheatManagerApp(tk.Tk):
         # tree now, so the row stays readable at any name length.
         return f"{self.GLYPH['on' if node.get('enabled') else 'off']} {node['name']}"
 
+    def _update_database(self):
+        """
+        Refresh the downloaded database, off the GUI thread.
+
+        The download is a couple of MB and the unpack is ~1500 small files,
+        so doing it inline would freeze the window for seconds. Progress and
+        the result are marshalled back with after(), which is the only safe
+        way to touch Tk from a worker.
+        """
+        if getattr(self, '_db_busy', False):
+            return
+        self._db_busy = True
+        self.status_label.config(text="Database: starting\u2026", fg="#FF9800")
+
+        def worker():
+            try:
+                dbfetch.download(
+                    Config.base_dir(),
+                    progress=lambda m: self.after(
+                        0, lambda: self.status_label.config(
+                            text=m, fg="#FF9800")))
+                self.after(0, done, None)
+            except Exception as exc:                        # noqa: BLE001
+                self.after(0, done, exc)
+
+        def done(err):
+            self._db_busy = False
+            if err is not None:
+                self.status_label.config(text="Database update failed",
+                                         fg="#f44336")
+                messagebox.showerror(
+                    "Update Database",
+                    f"Could not update the database.\n\n{err}", parent=self)
+                self.after(4000, self._restore_status)
+                return
+            # Re-read from disk and rebuild, so the new entries appear without
+            # a restart. Enabled flags on database nodes do not survive this:
+            # they are not ours to persist, and the tree they lived on has
+            # just been replaced.
+            self._attach_db_trees()
+            self._display_cheats(self.selected_game_idx)
+            self._refresh_game_list()
+            self._rebuild_active_blocks()
+            self.status_label.config(
+                text=dbfetch.status_line(Config.base_dir()), fg="#4CAF50")
+            self.after(6000, self._restore_status)
+
+        threading.Thread(target=worker, daemon=True,
+                         name="db-update").start()
+
+    def _attach_db_trees(self):
+        """
+        Hang the cached database off each game under 'db_cheats'/'db_patches'.
+
+        Matched on the filename stem, which is the same SERIAL_TITLEID key the
+        user's own files use, so a game gets its database entries whether it
+        was loaded from a file or a legacy INI section. Database-only games
+        are appended so they show up in the list too -- with no cheats of
+        their own, which is exactly what they have.
+        """
+        self._db_games = 0
+        try:
+            db = dbfetch.load_trees(Config.base_dir())
+        except Exception as exc:                            # noqa: BLE001
+            print(f"[!] database load failed: {exc}")
+            db = {}
+        by_stem = {}
+        for game in self.games:
+            stem = Config._stem_of(game)
+            if stem:
+                by_stem.setdefault(stem, game)
+        for stem, rec in db.items():
+            game = by_stem.get(stem)
+            if game is None:
+                game = {'name': rec['name'], 'path': '', 'stem': stem,
+                        'titleid': rec['titleid'], 'serial': rec['serial'],
+                        'cheats': [], 'patches': [], 'active': False,
+                        '_db_only': True}
+                self.games.append(game)
+                by_stem[stem] = game
+            game['db_cheats'] = dbfetch.mark_db(rec['cheats'])
+            game['db_patches'] = dbfetch.mark_db(rec['patches'])
+            self._db_games += 1
+
+    def _db_section(self, game, section):
+        """The database node list for a game and section, or []."""
+        return game.get('db_cheats' if section == "cheats"
+                        else 'db_patches', []) or []
+
     def _display_cheats(self, idx):
         self._capture_open_state()      # before the item ids are thrown away
         self._clear_cheat_view()
@@ -725,8 +859,23 @@ class CheatManagerApp(tk.Tk):
                           else self.games[idx])
         if idx is None or idx >= len(self.games):
             return
-        self._insert_nodes("", game_section(self.games[idx],
-                                           self._current_section()))
+        game = self.games[idx]
+        section = self._current_section()
+        self._insert_nodes("", game_section(game, section))
+        # Database entries go underneath the user's own, in their own labelled
+        # group, so it is always obvious which is which. The group is built
+        # fresh each time rather than stored, so it can never be mistaken for
+        # a real node and end up in a file.
+        if self._db_enabled:
+            db_nodes = self._db_section(game, section)
+            if db_nodes:
+                header = self.cheat_tree.insert(
+                    "", "end",
+                    text=f"\U0001F5C4  Database  ({len(list(walk_cheats(db_nodes)))} "
+                         f"{'entry' if len(list(walk_cheats(db_nodes))) == 1 else 'entries'})",
+                    open=bool(self._db_open), tags=("group",))
+                self._db_header_item = header
+                self._insert_nodes(header, db_nodes)
 
     def _insert_nodes(self, parent_item, nodes):
         for node in self._ordered(nodes):
@@ -826,6 +975,14 @@ class CheatManagerApp(tk.Tk):
         the visible state rather than on whether the <<TreeviewOpen>> handler
         happened to have run, and in the right order, beforehand.
         """
+        # The Database header is synthetic: it has no node behind it, so its
+        # expansion has to be remembered on the window instead.
+        header = getattr(self, '_db_header_item', None)
+        if header:
+            try:
+                self._db_open = bool(self.cheat_tree.item(header, "open"))
+            except Exception:                               # noqa: BLE001
+                pass
         for item, node in self._tree_items.items():
             if not is_group(node):
                 continue
@@ -1000,6 +1157,8 @@ class CheatManagerApp(tk.Tk):
         commits it, for when you want the file itself tidied - it cannot be
         undone by switching back to "Order added".
         """
+        if self._db_locked("sorte"):
+            return
         cheats = self._current_cheats()
         if cheats is None:
             return
@@ -1124,6 +1283,34 @@ class CheatManagerApp(tk.Tk):
         return any(child is candidate or
                    (is_group(child) and CheatManagerApp._is_ancestor(child, candidate))
                    for child in node['children'])
+
+    def _db_locked(self, action="change"):
+        """
+        True (and complains) if the selection includes a database entry.
+
+        Database entries are a downloaded copy of a shared file. Editing one
+        would either be silently discarded on the next refresh or, worse,
+        written into the user's own file and become indistinguishable from
+        their own work. Enabling is deliberately not routed through here.
+        """
+        for item in self.cheat_tree.selection():
+            node = self._tree_items.get(item)
+            if node is not None and node.get('_db'):
+                messagebox.showinfo(
+                    "Database entry",
+                    f"Database entries are read-only, so they cannot be "
+                    f"{action}d.\n\nCopy it (Ctrl+C) and paste it into your "
+                    "own list first if you want to change it.", parent=self)
+                return True
+        # The synthetic Database header has no node behind it at all.
+        header = getattr(self, '_db_header_item', None)
+        if header and header in self.cheat_tree.selection():
+            messagebox.showinfo(
+                "Database entry",
+                "The Database group is not a real group and cannot be "
+                f"{action}d.", parent=self)
+            return True
+        return False
 
     def _selected_node(self):
         sel = self.cheat_tree.selection()
@@ -1256,6 +1443,13 @@ class CheatManagerApp(tk.Tk):
         blocks = []
         for section in SECTIONS:
             blocks.extend(enabled_cheats(self.games[idx].get(section, []) or []))
+            # Database entries run exactly like the user's own -- being able
+            # to tick one and have it do nothing would be worse than not
+            # showing them at all. Skipped entirely when the checkbox is off,
+            # so unticking it also stops anything from the database.
+            if self._db_enabled:
+                blocks.extend(enabled_cheats(
+                    self._db_section(self.games[idx], section)))
         self._active_blocks = tuple(blocks)
         # After the freeze list is narrowed, never before: restoring first
         # would race a tick already in flight, which would rewrite the patch
@@ -1508,6 +1702,8 @@ class CheatManagerApp(tk.Tk):
         self._save_autosave(immediate=True)
 
     def _edit_selected(self):
+        if self._db_locked("edite"):
+            return
         item, node = self._selected_node()
         if node is None:
             return
@@ -1708,6 +1904,8 @@ class CheatManagerApp(tk.Tk):
 
     def _move_selected_to_root(self):
         """Take the selection out of its group, back to the main cheat list."""
+        if self._db_locked("move"):
+            return
         cheats = self._current_cheats()
         if cheats is None:
             return
@@ -1795,6 +1993,8 @@ class CheatManagerApp(tk.Tk):
 
     def _move_to_group_dialog(self):
         """Toolbar entry point: pick a destination group for the selection."""
+        if self._db_locked("move"):
+            return
         picked = self._selected_nodes()
         if not picked:
             messagebox.showinfo("Group", "Select one or more cheats first.")
@@ -1842,6 +2042,8 @@ class CheatManagerApp(tk.Tk):
         self._grab_when_viewable(win)
 
     def _delete_selected(self):
+        if self._db_locked("delete"):
+            return
         picked = self._selected_nodes()
         if not picked:
             return
@@ -1963,7 +2165,8 @@ class CheatManagerApp(tk.Tk):
         try:
             Config.save(self.games, self.geometry(), self.freeze_interval_ms,
                         self._sort_mode,
-                        getattr(self.cheat_engine, 'gdb_enabled', True))
+                        getattr(self.cheat_engine, 'gdb_enabled', True),
+                        getattr(self, '_db_enabled', False))
         except Exception as e:
             print(f"[!] Could not save database: {e}")
 

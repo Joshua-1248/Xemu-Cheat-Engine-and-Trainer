@@ -209,15 +209,33 @@ class Config:
             return True
 
     @staticmethod
+    def load_db_cheats():
+        """
+        Whether the downloaded database is merged into the lists.
+
+        Off by default: the database is someone else's cheats, and turning it
+        on without being asked would make a user's own list look like it had
+        grown entries they never added.
+        """
+        try:
+            c = configparser.ConfigParser(); c.read(Config.FILE, encoding='utf-8')
+            return c.getboolean('main', 'load_db_cheats', fallback=False)
+        except Exception:
+            return False
+
+    @staticmethod
     def save(games_list: list, geometry: str, freeze_ms: int = 50,
-             sort_mode: str = "Order added", gdb_patching: bool = True):
+             sort_mode: str = "Order added", gdb_patching: bool = True,
+             load_db_cheats: bool = False):
         config = configparser.ConfigParser()
         config['main'] = {
             'geometry': geometry,
             'freeze_interval_ms': str(int(freeze_ms)),
             'sort_mode': sort_mode,
             'gdb_patching': str(bool(gdb_patching)),
-            'games': ','.join(g['name'] for g in games_list)
+            'load_db_cheats': str(bool(load_db_cheats)),
+            'games': ','.join(g['name'] for g in games_list
+                              if not g.get('_db_only'))
         }
         # ---- decide who writes which file, before writing anything -------
         #
@@ -231,6 +249,13 @@ class Config:
         # file whose cheats belonged to the other section.
         plan = {}                       # path -> (game_name, kind, tree)
         for game in games_list:
+            # Games that exist only because the downloaded database has a file
+            # for them own nothing here. Writing them would create an empty
+            # cheats/ and patches/ file for every one of the ~736 database
+            # entries, which would then be indistinguishable from the user's
+            # own empty games on the next load.
+            if game.get('_db_only'):
+                continue
             stem = Config._stem_of(game)
             if not stem:
                 continue
@@ -242,6 +267,8 @@ class Config:
                     plan[fp] = (game['name'], kind, tree)
 
         for game in games_list:
+            if game.get('_db_only'):
+                continue
             section = f"game:{game['name']}"
             titleid = (game.get('titleid') or '').strip()
             serial = (game.get('serial') or '').strip()
