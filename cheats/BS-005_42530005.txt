@@ -1,4 +1,26 @@
-//game=Elder Scrolls III, The: Morrowind - Game of the Year Edition
-//serial=BS-005
-//titleid=42530005
-//kind=cheats
+gametitle=Elder Scrolls III, The: Morrowind - Game of the Year Edition
+
+[Infinite]
+
+[Infinite\Stamina]
+author=Josh_7774
+enabled=0
+20927178 432F0000
+
+[Infinite\Stamina (Alternate)]
+enabled=0
+20927178 7F7FFFFF
+
+[Infinite\Health]
+enabled=0
+20927154 43480000
+
+[Infinite\Health (Alternate)]
+enabled=0
+20927154 461C3C00
+
+[Infinite\Hold Left Trigger To Moon Jump]
+author=Josh_7774
+enabled=0
+D00002A5 010000FF
+20906EDC 43960000
